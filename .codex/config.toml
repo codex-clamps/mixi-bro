@@ -1,7 +1,7 @@
-# Project-scoped Codex subagent limits.
-# Keep nesting shallow: the lead thread owns synthesis and all final decisions.
+# One lead owns synthesis and integration while three direct workers use isolated worktrees.
+# Keep nesting shallow so workers cannot create overlapping write ownership.
 [agents]
-max_threads = 6
+max_threads = 4
 max_depth = 1
 job_max_runtime_seconds = 1800
 interrupt_message = true

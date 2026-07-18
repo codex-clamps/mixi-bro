@@ -52,8 +52,9 @@ Use this target shape unless an accepted ADR documents a better boundary:
 :core:model                  immutable domain models and value types
 :core:common                 dispatchers, result types, logging interfaces, small utilities
 :core:data                   Room/DataStore repositories, migrations, import/export
-:core:browser                engine-neutral browser, tab, profile, permission, and download ports
-:engine:gecko                GeckoRuntime, GeckoSession, GeckoView, delegates, extension adapter
+:core:browser                engine-neutral browser, tab, profile, site-permission, and download ports
+:core:extensions             extension trust policy, permission/compatibility state, install/update/private-access ports
+:engine:gecko                GeckoRuntime, GeckoSession, GeckoView, delegates, extension controller and bridge adapters
 :feature:browser             browser chrome and page host
 :feature:home                new-tab/home experience and shortcuts
 :feature:tabs                tab switcher, groups if later approved, restore UX
@@ -64,9 +65,10 @@ Use this target shape unless an accepted ADR documents a better boundary:
 :feature:settings            settings, privacy, site permissions, accessibility
 :feature:about               attribution, engine/build details, licenses
 :benchmark                   startup, scrolling, tab-switching, and memory benchmarks
+:testing:web-fixtures        deterministic local HTTP/HTTPS, TLS, media, download, and extension fixtures
 ```
 
-Dependency direction is feature/UI -> domain ports -> data/engine implementations. `:engine:gecko` may depend on `:core:browser`; `:core:browser` must not depend on GeckoView. Do not create a generic abstraction merely to hide a single line of code; boundaries should protect lifecycle, testability, or policy.
+Dependency direction is feature/UI -> domain ports -> data/engine implementations. `:engine:gecko` may depend on `:core:browser` and `:core:extensions`; neither core module may depend on GeckoView. `:feature:extensions` consumes engine-neutral state and ports from `:core:extensions`; GeckoView controller and bridge implementations remain in `:engine:gecko`. Browser/site permissions stay in `:core:browser`; WebExtension trust, permissions, compatibility, install, update, enablement, and private-access policy stay in `:core:extensions`. `:testing:web-fixtures` is test-only.
 
 ## GeckoView engineering rules
 
@@ -89,6 +91,8 @@ Implement two distinct extension classes:
 
 1. **Built-in bridge extension**: packaged in app assets, versioned with the app, and limited to capabilities mixi-bro itself requires, such as safe content-script coordination and browser-action plumbing.
 2. **User extensions**: installed and managed through GeckoView's `WebExtensionController`, with visible source, identity, version, permission, update, enable/disable, private-mode, and uninstall controls.
+
+All extension trust decisions cross an engine-neutral boundary. `:core:extensions` owns source trust, permission and compatibility models, and install/update/enable/private-access ports. `:engine:gecko` translates GeckoView APIs into those ports. `:feature:extensions` must not import GeckoView types.
 
 Required safeguards:
 
@@ -131,32 +135,56 @@ Project-scoped Codex roles are defined in `.codex/agents/*.toml`; concurrency li
 
 ### Available roles
 
-- `architecture_explorer`: read-only repository mapping, upstream comparison, dependency and provenance analysis.
-- `geckoview_specialist`: read-only GeckoView lifecycle/API research, delegate and compatibility review.
-- `material3_tv_designer`: read-only Compose, Material 3 Expressive, accessibility, and remote-focus review.
-- `extension_security_reviewer`: read-only WebExtension threat review and permission/native-messaging audit.
-- `test_release_engineer`: CI, test matrix, reproducibility, performance, packaging, and release checks.
-- `implementer`: bounded code changes after the lead agent has synthesized a design.
+- `architecture_explorer`: read-only repository, dependency, and provenance analysis.
+- `geckoview_specialist`: read-only GeckoView lifecycle/API review.
+- `material3_tv_designer`: read-only Compose, accessibility, and remote-focus review.
+- `extension_security_reviewer`: read-only WebExtension threat and permission review.
+- `test_release_engineer`: CI, test, packaging, and release review.
+- `implementer`: bounded single-writer work outside the three-lane protocol.
+- `platform_writer`: browser contracts, shared primitives, models, and Gecko implementation.
+- `product_writer`: design system and feature/UI implementation.
+- `data_trust_writer`: persistence, extension trust contracts, fixtures, benchmarks, CI, and security/release documentation.
+
+### Three-writer ownership
+
+Three implementation worktrees start from one frozen base commit. Ownership is exclusive after that commit.
+
+| Lane | Exclusive writable paths |
+|---|---|
+| Platform | `core/common/**`, `core/model/**`, `core/browser/**`, `engine/gecko/**` |
+| Product | `design-system/**`, `feature/**`, including `feature/extensions/**` |
+| Data/trust | `core/data/**`, `core/extensions/**`, `testing/web-fixtures/**`, `benchmark/**`, `.github/workflows/**`, `docs/security/**`, `docs/release/**` |
+
+The lead/integration captain exclusively owns `app/**`; root Gradle/settings/version-catalog/wrapper/verification/build-logic files; `.codex/**`; `AGENTS.md`; `README.md`; `APPLY_TO_REPOSITORY.md`; shared roadmap and ADR files; and licensing, notice, attribution, and third-party-license files. A writer needing another owner's change sends a handoff request instead of editing that path.
 
 ### Required orchestration for non-trivial work
 
-A task is non-trivial when it crosses a module boundary, changes engine/session lifecycle, adds a screen, changes persistence, touches extension behavior, modifies security/privacy policy, or is likely to change more than three production files.
+For non-trivial work, the lead must:
 
-For such work, the lead agent must:
+1. Read this file and relevant plan/ADR documents.
+2. Run at least two relevant read-only specialist investigations in parallel and synthesize one decision.
+3. Commit frozen shared contracts, module registration, dependency versions, app wiring seams, and all other lead-only changes on an integration branch.
+4. Record that base commit and create Platform, Product, and Data/trust branches and worktrees from it.
+5. Give each writer its allowlist, acceptance criteria, frozen revision, and focused checks.
+6. Require each writer to commit only allowlisted paths and report its head, changed paths, checks, assumptions, and handoffs.
+7. Pause affected writers before changing a frozen contract; revise the shared decision and realign affected worktrees from a common revision.
+8. Verify every head descends from the base, every path is allowlisted, the three path sets are pairwise disjoint, and no writer changed a lead-only path.
+9. Integrate all three completed heads in one octopus merge commit, not sequential merges or cherry-picks.
+10. Abort any conflicting merge and return the correction to the owner branch or frozen base. Never resolve it ad hoc in the integration worktree.
+11. Run focused and combined quality gates, request required specialist reviews, and report commits, path audits, tests, risks, and follow-ups.
 
-1. Read this file and the relevant plan/ADR documents.
-2. Spawn independent read-only agents in parallel for separable questions. Use at least two relevant specialist roles; engine-plus-UI work normally uses three.
-3. Give every subagent a narrow question, explicit file scope, expected output, and a requirement to cite paths/symbols or official sources.
-4. Wait for all assigned investigations, reconcile disagreements, and write one implementation decision before assigning edits.
-5. Give write ownership to one `implementer` per file or module. Do not allow concurrent agents to edit the same files.
-6. Run focused checks, then the repository quality gate.
-7. Ask the relevant read-only specialist to review the diff. Security-sensitive extension work always includes `extension_security_reviewer`; engine work includes `geckoview_specialist`; UI work includes `material3_tv_designer`.
-8. Summarize findings, decisions, tests, residual risks, and follow-up items in the PR.
+Shared design tokens belong to Product. Room migrations, workflows, and release documentation belong to Data/trust. Root build files, app wiring, roadmaps, ADRs, and licensing remain lead-only.
 
-Parallel agents are encouraged for exploration, API verification, test design, and review. Serialize migrations, version-catalog edits, shared design tokens, Gradle settings, and release configuration unless worktrees and ownership are clearly isolated.
+### Branch, commit, and conflict policy
+
+- Use `agent/<slice>-platform`, `agent/<slice>-product`, and `agent/<slice>-data-trust` from one recorded base.
+- Integrate all three branch heads in one octopus merge commit.
+- Reject any out-of-allowlist path or pairwise path overlap even if Git could merge it.
+- Keep broad formatting, generated files, shared scratch files, and cross-lane renames out of writer branches.
+- Treat contract changes as lead-owned integration events that pause and realign affected lanes.
+- Abort merge conflicts and repair the owner branch or base; do not resolve ownership conflicts during integration.
 
 For a small typo, localized test fix, or single-file documentation change, do not spawn agents merely to satisfy a number.
-
 ## Planning and change workflow
 
 1. Restate the user-visible behavior and acceptance criteria.
@@ -166,7 +194,7 @@ For a small typo, localized test fix, or single-file documentation change, do no
 5. Make the smallest coherent change that moves one acceptance criterion to done.
 6. Add tests with the implementation; do not defer all tests to a later phase.
 7. Run formatting, static analysis, unit tests, and the narrowest applicable Android/instrumentation checks.
-8. Keep commits focused. Use a feature branch and draft PR for normal work after repository bootstrap.
+8. Keep commits focused. Use a feature branch and draft PR for normal work after repository bootstrap; use the three-worktree protocol above when three writers are assigned.
 9. Update the plan when scope, dependencies, compatibility, or risks materially change.
 
 Do not claim a command passed unless its output was observed. If the environment lacks Android SDK, emulator, credentials, network access, or hardware, record the exact unrun checks and why.

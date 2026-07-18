@@ -18,3 +18,4 @@ signing.properties
 Thumbs.db
 .env
 .code-review-graph/
+/.worktrees/

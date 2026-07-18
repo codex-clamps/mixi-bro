@@ -5,6 +5,38 @@
 **Target repository:** `codex-clamps/mixi-bro`  
 **Reference project:** `truefedex/tv-bro`, release 2.1.6 / commit `10b8b1a9ff29fcbe5c55052eec61caf553d6964f`
 
+## 0. Accepted execution architecture
+
+[ADR-0004](adr/0004-three-agent-parallel-ownership.md) is authoritative for module ownership and parallel writing.
+
+### 0.1 Target project structure
+
+```text
+:app                         application wiring and top-level navigation
+:design-system               Material 3 Expressive tokens and adaptive components
+:core:common                 dispatchers, results, redacted logging, utilities
+:core:model                  immutable product-wide domain values
+:core:browser                browser/tab/profile/site-permission/download contracts
+:core:extensions             extension trust, permission/compatibility state, install/update/private-access ports
+:core:data                   Room/DataStore repositories, migrations, import/export
+:engine:gecko                Gecko runtime/session and extension controller/bridge implementations
+:feature:*                   product UI, including :feature:extensions
+:testing:web-fixtures        deterministic local HTTP/HTTPS and extension fixtures
+:benchmark                   startup, scrolling, tab-switching, memory, and size benchmarks
+```
+
+WebExtension policy moves out of `:core:browser`. `:core:extensions` owns engine-neutral source trust, identity, requested/granted permissions, compatibility, install/update, enablement, and private-access contracts. `:engine:gecko` implements them with GeckoView. `:feature:extensions` consumes them without GeckoView imports. `:testing:web-fixtures` is test-only.
+
+### 0.2 Parallel ownership
+
+| Lane | Exclusive paths after the base commit |
+|---|---|
+| Platform | `core/common/**`, `core/model/**`, `core/browser/**`, `engine/gecko/**` |
+| Product | `design-system/**`, `feature/**`, including `feature/extensions/**` |
+| Data/trust | `core/data/**`, `core/extensions/**`, `testing/web-fixtures/**`, `benchmark/**`, `.github/workflows/**`, `docs/security/**`, `docs/release/**` |
+
+The lead/integration captain exclusively owns `app/**`, root build/settings/version-catalog/wrapper/verification/build-logic files, `.codex/**`, governance files, shared roadmaps/ADRs, and licensing files. Shared contracts and integration files are frozen in a base commit before the three worktrees are created.
+
 ## 1. Executive recommendation
 
 Build mixi-bro as a controlled, license-compliant modernization of TV Bro rather than a superficial rename or an unrelated greenfield browser.
@@ -1337,78 +1369,45 @@ Do not commit private signing material. Use public test fixtures or CI-generated
 
 ### 15.4 Branch and review policy
 
-- protected `main`;
-- normal work on `agent/<description>` or feature branches;
-- draft PR by default for agent-generated work;
-- at least one human approval for release/security-sensitive changes;
-- engine updates require `geckoview_specialist` review;
-- extension changes require `extension_security_reviewer` review;
-- UI/focus changes require `material3_tv_designer` review;
-- migrations/release workflows require `test_release_engineer` review;
+- protect `main`;
+- use one lead-owned integration branch and recorded base commit per three-writer slice;
+- create `agent/<slice>-platform`, `agent/<slice>-product`, and `agent/<slice>-data-trust` worktrees from that exact base;
+- restrict each writer to its ADR-0004 allowlist;
+- verify each head descends from the base, every path is allowlisted, path sets are pairwise disjoint, and no lead-only path changed;
+- integrate all three completed heads in one octopus merge commit, not sequential merges or cherry-picks;
+- abort conflicts and return fixes to the owner branch or frozen base; never resolve them ad hoc in integration;
+- use draft PRs by default and require the applicable GeckoView, extension-security, Material/TV, migration, and release reviews;
 - do not merge failing or skipped required checks.
-
 ## 16. Multi-agent execution plan
 
-The repository includes six custom Codex roles and a maximum of six concurrent threads with one level of delegation.
+The implementation topology is one lead/integration captain plus three exclusive writer lanes. Read-only specialists investigate and review in parallel; production writes follow section 0 and ADR-0004.
 
-### 16.1 Standard feature workflow
+### 16.1 Freeze and branch
 
-Lead thread:
+1. State acceptance criteria and run relevant specialist investigations.
+2. Freeze shared models, browser ports, extension ports, fixture contracts, module registration, versions, app wiring seams, and test expectations.
+3. Commit those decisions and all lead-only integration files.
+4. Record the base commit.
+5. Create Platform, Product, and Data/trust branches and worktrees from that exact commit.
+6. Give each writer its allowlist, frozen revision, deliverables, and focused checks.
 
-1. Read `AGENTS.md`, this plan, and relevant ADRs.
-2. State acceptance criteria and file/module boundaries.
-3. Spawn in parallel:
-   - `architecture_explorer` to map current code and provenance;
-   - one domain specialist (`geckoview_specialist`, `material3_tv_designer`, or `extension_security_reviewer`);
-   - `test_release_engineer` to design validation if the change affects CI, persistence, packaging, or broad behavior.
-4. Wait and synthesize one design decision.
-5. Assign one bounded writer (`implementer`) per non-overlapping module/file set.
-6. Run tests and inspect the combined diff.
-7. Ask the domain specialist to review the diff read-only.
-8. Fix findings serially and prepare the PR summary.
+A frozen-contract change pauses affected writers. The lead revises the decision and realigns affected worktrees from a common revision.
 
-### 16.2 Example: implement tab suspension
+### 16.2 Concurrent lanes
 
-Parallel investigation:
+Platform owns `core/common/**`, `core/model/**`, `core/browser/**`, and `engine/gecko/**`. Product owns `design-system/**` and `feature/**`, including extension UI. Data/trust owns `core/data/**`, `core/extensions/**`, `testing/web-fixtures/**`, `benchmark/**`, workflows, and security/release documentation.
 
-- `architecture_explorer`: map current tab/session persistence and ownership;
-- `geckoview_specialist`: verify state flush/restore/close and form/media constraints;
-- `test_release_engineer`: design process-death and memory-pressure tests.
+Each writer commits only allowlisted paths and reports its head, changed paths, checks, assumptions, risks, and handoff requests.
 
-Synthesis:
+### 16.3 Integration gate
 
-- lead defines active/warm/suspended/discarded states and ownership invariant.
+The lead verifies common ancestry, allowlist compliance, pairwise-disjoint path sets, no lead-only changes, observed focused checks, and completed handoffs. The lead then merges all three heads in one octopus merge commit.
 
-Writing:
+Any overlap rejects integration even if Git could merge it. Any conflict aborts the merge. Lane-local defects return to the lane owner; shared-contract defects return to the lead and a revised common base. The integration captain never resolves ownership conflicts ad hoc.
 
-- one implementer owns `:core:browser` reducer/models;
-- a second implementer may own `:engine:gecko` only in an isolated worktree after interfaces are frozen;
-- test writer owns instrumentation fixture files, not production files.
+### 16.4 Extension example
 
-Review:
-
-- Gecko specialist audits lifecycle races and API assumptions.
-
-### 16.3 Example: extension install screen
-
-Parallel investigation:
-
-- `extension_security_reviewer`: threat model and permission rules;
-- `material3_tv_designer`: focus graph and comprehension layout;
-- `geckoview_specialist`: install prompt fields/error codes/threading;
-- `architecture_explorer`: current extension bridge and data flow.
-
-Writing is serialized across shared extension policy and UI state. Do not let separate agents independently invent permission models.
-
-### 16.4 Conflict control
-
-- never assign two writers the same file;
-- version catalog, settings Gradle, shared design tokens, Room schema, and release workflow have one writer at a time;
-- use worktrees for parallel implementation only after interfaces are committed;
-- read-only agents may overlap freely;
-- the lead, not a subagent, resolves conflicting recommendations;
-- subagents may not spawn deeper subagents because `max_depth = 1`.
-
+The lead freezes engine-neutral extension contracts. Platform implements Gecko controller/bridge adapters in `engine/gecko/**`. Product implements extension UI in `feature/extensions/**`. Data/trust implements policy/state/ports, persistence, malicious fixtures, and CI/security coverage. Missing contracts return to the lead rather than crossing ownership.
 ## 17. Initial issue/epic backlog
 
 Create these as epics or milestones, then split into acceptance-testable issues.
@@ -1418,6 +1417,7 @@ Create these as epics or milestones, then split into acceptance-testable issues.
 - import/tag upstream source;
 - license/notice/About requirements;
 - AGENTS and subagent config;
+- ADR-0004 worktree ownership, path-audit, and octopus-integration procedure;
 - ADR template and contribution/security docs;
 - branch protections and issue labels.
 
@@ -1510,6 +1510,7 @@ Decide these explicitly; recommended defaults are shown.
 | Decision | Recommended default | Deadline |
 |---|---|---|
 | Source strategy | Preserve/import TV Bro history, then modernize | Phase 0 |
+| Parallel implementation | Three exclusive writer worktrees plus lead-owned octopus integration | Phase 0 |
 | Package ID | `io.github.codexclamps.mixibro` | Phase 0 |
 | Engine abstraction | Direct GeckoView behind product-level port | Phase 2 spike |
 | Production channel | Latest tested stable GeckoView only | Phase 1 |
@@ -1587,6 +1588,10 @@ Decide these explicitly; recommended defaults are shown.
 **Impact:** Gradle overhead and abstraction churn.  
 **Mitigation:** create modules at proven ownership boundaries, begin with core/engine/design/app, extract feature modules when active.
 
+### R13 - parallel branch drift or hidden overlap
+
+**Impact:** integration conflicts, duplicated contracts, ad hoc merge decisions, or an untested combined tree.  
+**Mitigation:** freeze shared contracts, enforce exclusive allowlists, verify pairwise-disjoint paths, use one octopus merge, and abort instead of resolving conflicts in integration.
 ## 20. Version-one release acceptance criteria
 
 A v1.0 release candidate is acceptable only when all of the following are true:
@@ -1643,33 +1648,40 @@ A v1.0 release candidate is acceptable only when all of the following are true:
 
 ## 21. First actionable development slice
 
-After repository access and source import are ready, the first PR-sized implementation slice should be narrowly defined:
+**Title:** `Freeze bootstrap contracts and integrate three writer lanes`
 
-**Title:** `Bootstrap mixi-bro identity and Gecko-only build`
+**Lead-owned base commit:**
 
-**Scope:**
+- preserve the TV Bro source/license baseline and establish mixi-bro identity;
+- register `:core:extensions` and `:testing:web-fixtures`;
+- pin shared toolchain and stable GeckoView versions;
+- freeze browser/session, extension trust/install/update/private-access, fixture, and UI-facing contracts;
+- create app wiring seams, record the base commit, and create all three worktrees.
 
-- import TV Bro 2.1.6 history or source baseline;
-- apply new root project/app/package identity;
-- retain license and add notice/About attribution;
-- remove `geckoExcluded` and make `:app:gecko` unconditional;
-- remove Android WebView implementation/dependency from the active build;
-- pin the latest stable GeckoView artifact available on the implementation date;
-- add Java 17 compatibility and basic CI assemble/test/lint;
-- do not yet rewrite every screen in Compose.
+**Concurrent work:**
+
+- Platform removes active WebView/fallback engine code and implements the Gecko runtime/session scaffold and Gecko extension adapters.
+- Product establishes design tokens, focus behavior, one-tab browser presentation, About, and extension UI seams.
+- Data/trust implements extension trust models/ports, persistence seams, deterministic web/extension fixtures, and owned CI/security/release coverage.
+
+**Integration:**
+
+1. Each writer commits only allowlisted paths and reports its head, paths, and focused checks.
+2. The lead proves common ancestry, allowlist compliance, and pairwise-disjoint changed-path sets.
+3. The lead merges all three heads in one octopus merge commit.
+4. A conflict aborts integration and returns to the owner branch or revised base.
+5. The lead runs the combined quality gate and specialist reviews.
 
 **Acceptance:**
 
-- debug APK installs as `io.github.codexclamps.mixibro` alongside TV Bro;
-- launcher shows mixi-bro with non-TV-Bro temporary art;
-- a page loads through GeckoView;
-- About displays TV Bro attribution and Gecko build version;
-- source/dependency search finds no production WebView renderer;
-- debug build passes lint/unit/assemble checks;
-- release configuration disables engine debugging.
+- three independent writer heads integrate in one conflict-free octopus merge;
+- no writer changed a lead-only path and no path overlaps another lane;
+- `:core:extensions` and `:feature:extensions` contain no GeckoView types;
+- deterministic fixtures remain test-only;
+- mixi-bro identity, TV Bro attribution, Gecko-only rendering, and release-safe engine settings are preserved;
+- focused and combined checks have recorded results.
 
-This slice creates a trustworthy base. The next PR should be the one-tab Compose/engine-contract vertical slice, not a large visual rewrite mixed with package migration.
-
+Later slices repeat the same base-freeze, three-worktree, path-audit, and single-octopus protocol.
 ## 22. Source references
 
 Current decisions were based on the following primary sources and should be rechecked when versions change:

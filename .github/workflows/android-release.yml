@@ -1,0 +1,171 @@
+name: Android Release Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ANDROID_COMPILE_SDK: "36"
+  GRADLE_OPTS: -Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g
+
+jobs:
+  build-release:
+    name: Build unpublished release artifacts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify release prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          [[ -f gradlew ]] || missing+=("gradlew")
+          [[ -f gradlew.bat ]] || missing+=("gradlew.bat")
+          [[ -f gradle/wrapper/gradle-wrapper.jar ]] || missing+=("gradle/wrapper/gradle-wrapper.jar")
+          [[ -f gradle/wrapper/gradle-wrapper.properties ]] || missing+=("gradle/wrapper/gradle-wrapper.properties")
+          [[ -f settings.gradle.kts ]] || missing+=("settings.gradle.kts")
+          [[ -f build.gradle.kts ]] || missing+=("build.gradle.kts")
+          [[ -f gradle/libs.versions.toml ]] || missing+=("gradle/libs.versions.toml")
+          [[ -f app/build.gradle.kts ]] || missing+=("app/build.gradle.kts")
+          [[ -f NOTICE.md ]] || missing+=("NOTICE.md")
+          [[ -f licenses/TV_BRO_LICENSE.md ]] || missing+=("licenses/TV_BRO_LICENSE.md")
+          [[ -f LICENSE || -f LICENSE.md ]] || missing+=("LICENSE or LICENSE.md for mixi-bro-authored code")
+
+          if (( ${#missing[@]} > 0 )); then
+            for path in "${missing[@]}"; do
+              echo "::error title=Release prerequisite missing::${path}"
+            done
+            echo "Release builds remain blocked until the Android project and required licensing files are present."
+            exit 1
+          fi
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]; then
+              echo "::error title=Invalid release tag::Use a semantic version tag such as v1.2.3 or v1.2.3-rc.1."
+              exit 1
+            fi
+
+            if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+              echo "::error title=Main branch unavailable::The release checkout does not contain origin/main."
+              exit 1
+            fi
+
+            if ! git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/main; then
+              echo "::error title=Invalid release tag::Release tags must point to a commit contained in origin/main."
+              exit 1
+            fi
+          fi
+
+          chmod +x gradlew
+
+      - name: Reject production Android WebView references
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          roots=(app)
+          for root in core engine feature design-system; do
+            [[ -d "${root}" ]] && roots+=("${root}")
+          done
+
+          if grep -R -n -E \
+            --include='*.java' \
+            --include='*.kt' \
+            --exclude-dir=build \
+            --exclude-dir=test \
+            --exclude-dir=androidTest \
+            'android[.]webkit[.]WebView' "${roots[@]}"; then
+            echo "::error title=Forbidden production engine::mixi-bro production sources must not reference android.webkit.WebView."
+            exit 1
+          fi
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install Android platform
+        shell: bash
+        run: sdkmanager "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}"
+
+      - name: Set up read-only Gradle cache
+        uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+        with:
+          cache-read-only: true
+
+      - name: Run release checks and build APK/AAB
+        shell: bash
+        run: ./gradlew --no-daemon --stacktrace clean spotlessCheck lint test :app:assembleRelease :app:bundleRelease
+
+      - name: Collect artifacts and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist
+          mapfile -d '' artifacts < <(find app/build/outputs -type f \( -iname '*release*.apk' -o -iname '*release*.aab' \) -print0)
+
+          if (( ${#artifacts[@]} == 0 )); then
+            echo "::error title=Release artifacts missing::Gradle completed without producing a release APK or AAB under app/build/outputs."
+            exit 1
+          fi
+
+          for artifact in "${artifacts[@]}"; do
+            filename="$(basename "${artifact}")"
+            if [[ -e "dist/${filename}" ]]; then
+              echo "::error title=Duplicate artifact name::Multiple outputs are named ${filename}; give release variants unique archive names."
+              exit 1
+            fi
+            cp "${artifact}" "dist/${filename}"
+          done
+
+          cp NOTICE.md dist/NOTICE.md
+          cp licenses/TV_BRO_LICENSE.md dist/TV_BRO_LICENSE.md
+          if [[ -f LICENSE ]]; then
+            cp LICENSE dist/LICENSE
+          else
+            cp LICENSE.md dist/LICENSE.md
+          fi
+          (cd dist && sha256sum -- * > SHA256SUMS)
+
+      - name: Upload unpublished release bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mixi-bro-unpublished-release-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record release limitation
+        shell: bash
+        run: |
+          {
+            echo "### Release build staged"
+            echo
+            echo "The APK/AAB files are retained as internal Actions artifacts only."
+            echo "Protected signing, signature verification, SBOM/notices generation, and provenance must be added before public publishing is enabled."
+          } >> "${GITHUB_STEP_SUMMARY}"

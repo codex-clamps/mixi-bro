@@ -17,3 +17,4 @@ signing.properties
 .DS_Store
 Thumbs.db
 .env
+.code-review-graph/
